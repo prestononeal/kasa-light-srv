@@ -4,19 +4,34 @@ A local dashboard for the six independently switched AC outlets on a TP-Link Kas
 
 ## Set up
 
-From the repository directory, with Python 3.11 or newer installed:
+For a fresh checkout, open Terminal in the repository directory with Python 3.11 or newer installed. Skip the virtual environment setup if `.venv` is already installed. The last command preserves an existing `config.json`.
 
 ```sh
 python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install -r requirements.txt
-cp config.example.json config.json
+.venv/bin/python -m pip install -r requirements.txt
+cp -n config.example.json config.json
 ```
 
-1. Connect the HS300 to your Wi-Fi with the Kasa app. Run `kasa discover` from the virtual environment or check your router's device list to find its IP address. A DHCP reservation keeps the address stable.
+1. Connect the HS300 to your Wi-Fi with the Kasa app. Run `.venv/bin/kasa discover` or check your router's device list to find its IP address. A DHCP reservation keeps the address stable.
 2. Edit `config.json` with the strip's IP, your latitude and longitude, and your IANA time zone, such as `America/Chicago`. The example coordinates are for Chicago.
 3. Set each outlet's light name and `on_start` setting. Outlet numbers run from 1 through 6 in the same order as the strip reports them. Verify the mapping against your strip with a single light when setting up. Omit unused outlets from `lights`. The server keeps those outlets off.
-4. Run `python server.py` from the virtual environment. If your device requires TP-Link authentication, supply `KASA_USERNAME` and `KASA_PASSWORD` as environment variables before starting it.
+
+## Start the server on macOS
+
+Open Terminal and change to the repository directory. For a checkout at `~/git/kasa-light-srv`, run the following in the default macOS shell (zsh).
+
+```zsh
+cd ~/git/kasa-light-srv
+read -r 'KASA_USERNAME?TP-Link email: '
+read -rs 'KASA_PASSWORD?TP-Link password: '
+echo
+KASA_USERNAME="$KASA_USERNAME" KASA_PASSWORD="$KASA_PASSWORD" .venv/bin/python server.py
+unset KASA_USERNAME KASA_PASSWORD
+```
+
+Enter the email and password for the TP-Link account linked to the strip. The password prompt hides what you type. The command passes the credentials to the server process, so `config.json` only needs the strip address, location, and outlet settings. If your strip works without authentication, run `.venv/bin/python server.py` directly from the repository directory.
+
+Wait for `Running on http://0.0.0.0:8080` in Terminal. Leave that window open while the server runs. Press `Ctrl+C` to stop it.
 
 Open `http://localhost:8080` on the server. On other devices on the same Wi-Fi, open `http://<server-LAN-IP>:8080` using the server's IPv4 address, separate from the strip's address. On a Mac, look under System Settings → Wi-Fi → Details → TCP/IP. Allow incoming connections if the host firewall prompts. Anyone who can reach the dashboard can use it, so keep it on your trusted local network and leave router port forwarding disabled.
 
