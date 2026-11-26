@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Christmas Lights</title>
+<style>
+  :root { color-scheme: dark; font: 16px system-ui, sans-serif; color: #fff7e9; background: #101c18; }
+  body { margin: 0; background: radial-gradient(ellipse at top, #244638, transparent 38rem); min-height: 100vh; }
+  main { max-width: 56rem; margin: auto; padding: clamp(1.25rem, 5vw, 4rem); }
+  h1 { font: 500 clamp(2.75rem, 8vw, 5.25rem)/1 Georgia, serif; margin: 0 0 1rem; letter-spacing: -.055em; }
+  h2 { margin: .5rem 0; font-size: 1.3rem; overflow-wrap: anywhere; }
+  p { color: #c1d1c6; }
+  #schedule { color: #f6d592; }
+  #message:empty { display: none; }
+  #message { color: #ffcfbc; padding: .85rem 1rem; background: #3a2824; border-radius: .65rem; }
+  #outlets { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 15rem), 1fr)); gap: 1rem; margin-top: 2rem; }
+  article { border: 1px solid #426354; border-radius: 1rem; padding: 1.15rem; background: #172b23; }
+  article[data-on="true"] { border-color: #b49a5d; }
+  small { color: #c1d1c6; }
+  button { width: 100%; min-height: 2.8rem; border: 1px solid #adc5b4; border-radius: .6rem; background: #243f33; color: inherit; font: inherit; cursor: pointer; }
+  button[aria-pressed="true"] { background: #f6d592; color: #2e2516; border-color: #f6d592; }
+  button:disabled { opacity: .62; cursor: default; }
+  button:focus-visible { outline: 2px solid white; outline-offset: 3px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Christmas Lights</h1>
+  <p id="schedule">Loading the light schedule…</p>
+  <p id="message" role="status"></p>
+  <section id="outlets" aria-label="Light controls"></section>
+</main>
+<script>
+const schedule = document.querySelector('#schedule');
+const message = document.querySelector('#message');
+const outlets = document.querySelector('#outlets');
+const cards = new Map();
+let pending = false;
+let commandError = '';
+
+function render(data) {
+  const next = data.next_time && new Intl.DateTimeFormat(undefined, {
+    timeZone: data.timezone, weekday: 'short', hour: 'numeric', minute: '2-digit', timeZoneName: 'short'
+  }).format(new Date(data.next_time));
+  const phase = data.night ? 'Night controls are open' : 'Daytime · lights off';
+  schedule.textContent = next ? `${phase} · Next ${data.next_event} ${next}` : phase;
+  message.textContent = commandError || data.error || '';
+  for (const light of data.lights) {
+    if (!cards.has(light.port)) {
+      const card = document.createElement('article');
+      const label = document.createElement('small');
+      const name = document.createElement('h2');
+      const startup = document.createElement('p');
+      const button = document.createElement('button');
+      label.textContent = `Outlet ${light.port}`;
+      name.textContent = light.name;
+      startup.textContent = light.on_start ? 'Turns on at sunset' : 'Manual after sunset';
+      button.addEventListener('click', () => toggle(light.port, card.dataset.on !== 'true'));
+      card.append(label, name, startup, button);
+      outlets.append(card);
+      cards.set(light.port, {card, button});
+    }
+    const {card, button} = cards.get(light.port);
+    card.dataset.on = light.on;
+    button.textContent = light.on === null ? 'Unavailable' : light.on ? 'On' : 'Off';
+    button.setAttribute('aria-pressed', String(light.on === true));
+    button.setAttribute('aria-label', `${light.name} power`);
+    button.disabled = pending || !data.night || Boolean(data.error);
+  }
+}
+
+async function refresh() {
+  if (pending) return;
+  try {
+    const response = await fetch('/api/status', {cache: 'no-store'});
+    if (!response.ok) throw new Error('Dashboard unavailable.');
+    const data = await response.json();
+    if (!pending) render(data);
+  } catch {
+    if (pending) return;
+    message.textContent = 'Dashboard unavailable. Reconnecting…';
+    for (const {button} of cards.values()) button.disabled = true;
+  }
+}
+
+async function toggle(port, on) {
+  if (pending) return;
+  pending = true;
+  commandError = '';
+  for (const {button} of cards.values()) button.disabled = true;
+  try {
+    const response = await fetch(`/api/lights/${port}`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({on})
+    });
+    if (!response.ok) throw new Error(await response.text());
+  } catch (error) {
+    commandError = error.message;
+  } finally {
+    pending = false;
+    await refresh();
+  }
+}
+
+refresh();
+setInterval(refresh, 3000);
+</script>
+</body>
+</html>
