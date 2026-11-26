@@ -64,7 +64,7 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
             path = Path(directory) / "state.json"
             controller = Controller(CONFIG, path)
             strip = Strip()
-            controller.device = strip
+            controller.strips["main"].device = strip
             with patch.object(controller.schedule, "current", return_value=("tonight", "sunrise", None)) as current:
                 await controller.reconcile()
                 self.assertEqual([outlet.is_on for outlet in strip.children], [True] + [False] * 5)
@@ -79,7 +79,7 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(json.loads(path.read_text())["lights"], {"2": True})
 
                     restarted = Controller(CONFIG, path)
-                    restarted.device = strip
+                    restarted.strips["main"].device = strip
                     with patch.object(restarted.schedule, "current", return_value=current.return_value):
                         await strip.children[1].turn_off()
                         await restarted.reconcile()
@@ -96,6 +96,101 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
                     async with controller.lock:
                         await controller.reconcile()
                     self.assertEqual([outlet.is_on for outlet in strip.children], [True] + [False] * 5)
+
+    async def test_random_rotation_across_strips_and_manual_countdown(self):
+        config = {
+            **{key: CONFIG[key] for key in ("latitude", "longitude", "timezone")},
+            "strips": {"front": "127.0.0.1", "upstairs": "127.0.0.2"},
+            "lights": {
+                "peppermints": {"name": "Peppermints", "window": "Front bay",
+                                "strip": "front", "port": 1, "on_start": True},
+                "star": {"name": "Star", "window": "Landing",
+                         "strip": "upstairs", "port": 1, "on_start": True},
+            },
+        }
+        sunset_at = datetime(2026, 11, 26, 0, 0, tzinfo=timezone.utc)
+        night = (sunset_at.isoformat(), "sunrise", None)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "state.json"
+            controller = Controller(config, path)
+            front, upstairs = Strip(), Strip()
+            controller.strips["front"].device = front
+            controller.strips["upstairs"].device = upstairs
+            with (
+                patch.object(controller.schedule, "current", return_value=night) as phase,
+                patch("server.utc_now", return_value=sunset_at) as clock,
+                patch("server.random.choice", side_effect=lambda choices: choices[0]) as pick,
+            ):
+                await controller.reconcile()
+                self.assertTrue(front.children[0].is_on)
+                self.assertTrue(upstairs.children[0].is_on)
+                self.assertFalse(controller.status()["rotation"]["enabled"])
+
+                async with TestClient(TestServer(make_app(controller))) as client:
+                    response = await client.post("/api/rotation", json={"enabled": True})
+                    self.assertEqual(response.status, 200)
+                    self.assertEqual(
+                        (await response.json())["rotation"]["next_at"], sunset_at.timestamp() + 300
+                    )
+                    clock.return_value = sunset_at + timedelta(seconds=299)
+                    await controller.reconcile()
+                    pick.assert_not_called()
+
+                    clock.return_value = sunset_at + timedelta(minutes=5)
+                    await controller.reconcile()
+                    self.assertTrue(front.children[0].is_on)
+                    self.assertFalse(upstairs.children[0].is_on)
+                    self.assertEqual(controller.status()["rotation"]["active"], "Peppermints")
+
+                    clock.return_value = sunset_at + timedelta(minutes=6)
+                    response = await client.post("/api/lights/star", json={"on": True})
+                    self.assertEqual(response.status, 200)
+                    self.assertTrue(front.children[0].is_on)
+                    self.assertTrue(upstairs.children[0].is_on)
+                    state = (await response.json())["rotation"]
+                    self.assertTrue(state["manual"])
+                    self.assertEqual(state["next_at"], clock.return_value.timestamp() + 300)
+
+                    clock.return_value = sunset_at + timedelta(minutes=8)
+                    response = await client.post("/api/lights/star", json={"on": False})
+                    self.assertEqual(response.status, 200)
+                    self.assertFalse(upstairs.children[0].is_on)
+                    self.assertEqual(
+                        (await response.json())["rotation"]["next_at"],
+                        clock.return_value.timestamp() + 300,
+                    )
+
+                    restarted = Controller(config, path)
+                    restarted.strips["front"].device = front
+                    restarted.strips["upstairs"].device = upstairs
+                    with patch.object(restarted.schedule, "current", return_value=night):
+                        clock.return_value = sunset_at + timedelta(minutes=12)
+                        await restarted.reconcile()
+                        self.assertTrue(front.children[0].is_on)
+                        self.assertFalse(upstairs.children[0].is_on)
+
+                        clock.return_value = sunset_at + timedelta(minutes=13)
+                        await restarted.reconcile()
+                        pick.assert_called_with(["star"])
+                        self.assertFalse(front.children[0].is_on)
+                        self.assertTrue(upstairs.children[0].is_on)
+                        self.assertEqual(restarted.status()["rotation"]["active"], "Star")
+
+                    phase.return_value = (None, "sunset", None)
+                    await controller.reconcile()
+                    self.assertFalse(any(outlet.is_on for outlet in front.children + upstairs.children))
+                    self.assertIsNone(controller.status()["rotation"]["next_at"])
+                    phase.return_value = (
+                        (sunset_at + timedelta(days=1)).isoformat(), "sunrise", None
+                    )
+                    clock.return_value = sunset_at + timedelta(days=1)
+                    await controller.reconcile()
+                    self.assertTrue(front.children[0].is_on)
+                    self.assertTrue(upstairs.children[0].is_on)
+                    self.assertEqual(
+                        controller.status()["rotation"]["next_at"],
+                        clock.return_value.timestamp() + 300,
+                    )
 
 
 if __name__ == "__main__":

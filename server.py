@@ -4,6 +4,8 @@ import ipaddress
 import json
 import logging
 import os
+import random
+import re
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -15,6 +17,7 @@ from astral.sun import sunrise, sunset
 from kasa import AuthenticationError, Discover
 from kasa.iot import IotPlug, IotStrip
 
+ROTATION_INTERVAL = 300
 OUTLETS = tuple(str(port) for port in range(1, 7))
 LOG = logging.getLogger(__name__)
 
@@ -54,22 +57,11 @@ class Schedule:
         )
 
 
-class Controller:
-    def __init__(self, config, state_path):
-        self.host = config["strip_host"]
-        if not isinstance(self.host, str) or not self.host.strip() or self.host == "192.0.2.10":
-            raise ValueError("Set strip_host to your HS300's IP address")
-        self.lights = config["lights"]
-        if not isinstance(self.lights, dict) or not self.lights.keys() <= set(OUTLETS):
-            raise ValueError("lights must map outlet numbers 1 through 6 to light settings")
-        for light in self.lights.values():
-            if (not isinstance(light, dict) or not isinstance(light.get("name"), str)
-                    or not light["name"].strip() or type(light.get("on_start")) is not bool):
-                raise ValueError("Each light needs a name and a boolean on_start")
-        self.schedule = Schedule(config)
-        self.state_path = state_path
-        self.overrides = json.loads(state_path.read_text()) if state_path.exists() else {}
-        self.lock = asyncio.Lock()
+class PowerStrip:
+    def __init__(self, host):
+        if not isinstance(host, str) or not host.strip() or host == "192.0.2.10":
+            raise ValueError("Set each HS300's IP address")
+        self.host = host
         self.device = None
         self.actual = {}
         self.error = "Connecting to the HS300…"
@@ -82,7 +74,7 @@ class Controller:
             except Exception as exc:
                 LOG.debug("Error closing the HS300 connection: %s", exc)
 
-    async def reconcile(self):
+    async def reconcile(self, on_ports):
         try:
             if self.device is None:
                 self.device = await Discover.discover_single(
@@ -93,27 +85,24 @@ class Controller:
             if self.device is None:
                 raise RuntimeError("No device answered discovery")
             # KLAP discovery can identify this strip as a plain IOT plug.
-            # Reuse its negotiated protocol with the outlet-aware device class.
             if isinstance(self.device, IotPlug) and self.device.model.startswith("HS300"):
                 self.device = IotStrip(self.host, protocol=self.device.protocol)
             await self.device.update(update_children=False)
             if not self.device.model.startswith("HS300") or len(self.device.children) != 6:
                 raise RuntimeError("Expected an HS300 with six individually controllable outlets")
+            outlets = dict(zip(OUTLETS, self.device.children))
             changed = False
-            for port, outlet in zip(OUTLETS, self.device.children):
-                night, _, _ = self.schedule.current(datetime.now(timezone.utc))
-                defaults = self.lights.get(port, {}).get("on_start", False)
-                overrides = self.overrides.get("lights", {}) if night == self.overrides.get("night") else {}
-                desired = bool(night) and overrides.get(port, defaults)
-                if outlet.is_on != desired:
-                    await (outlet.turn_on() if desired else outlet.turn_off())
-                    changed = True
+            for desired in (False, True):
+                for port, outlet in outlets.items():
+                    if (port in on_ports) == desired and outlet.is_on != desired:
+                        await (outlet.turn_on() if desired else outlet.turn_off())
+                        changed = True
             if changed:
                 await self.device.update(update_children=False)
-            self.actual = {port: outlet.is_on for port, outlet in zip(OUTLETS, self.device.children)}
+            self.actual = {port: outlet.is_on for port, outlet in outlets.items()}
             self.error = None
         except Exception as exc:
-            LOG.warning("HS300 update failed: %s", exc)
+            LOG.warning("HS300 at %s update failed: %s", self.host, exc)
             if isinstance(exc, AuthenticationError):
                 self.error = "HS300 authentication failed. Check KASA_USERNAME and KASA_PASSWORD."
             else:
@@ -121,51 +110,203 @@ class Controller:
             self.actual = {}
             await self.disconnect()
 
-    def status(self):
-        night, event, time = self.schedule.current(datetime.now(timezone.utc))
+
+def configured_lights(config):
+    lights = config["lights"]
+    if not isinstance(lights, dict):
+        raise ValueError("lights must map light IDs to settings")
+
+    # Legacy single-strip configs use outlet numbers as their light IDs.
+    legacy = "strips" not in config
+    hosts = {"main": config["strip_host"]} if legacy else config["strips"]
+    if not isinstance(hosts, dict) or not hosts:
+        raise ValueError("strips must map strip names to HS300 IP addresses")
+    strips = {name: PowerStrip(host) for name, host in hosts.items()}
+    if len({strip.host for strip in strips.values()}) != len(strips):
+        raise ValueError("Each strip needs a unique address")
+
+    mapped = {}
+    used_ports = set()
+    for light_id, light in lights.items():
+        if (not re.fullmatch(r"[a-zA-Z0-9_-]+", light_id) or not isinstance(light, dict)
+                or not isinstance(light.get("name"), str) or not light["name"].strip()
+                or type(light.get("on_start")) is not bool):
+            raise ValueError("Each light needs a valid ID, a name, and a boolean on_start")
+        strip = "main" if legacy else light.get("strip")
+        port = light_id if legacy else str(light.get("port"))
+        if not isinstance(strip, str) or strip not in strips or port not in OUTLETS:
+            raise ValueError(f"Light {light_id} needs a configured strip and outlet 1 through 6")
+        if (strip, port) in used_ports:
+            raise ValueError(f"Strip {strip} outlet {port} has more than one light")
+        used_ports.add((strip, port))
+        window = light.get("window", "")
+        if not isinstance(window, str):
+            raise ValueError(f"Light {light_id} needs a text window label")
+        mapped[light_id] = {
+            "id": light_id, "name": light["name"], "window": window.strip(),
+            "on_start": light["on_start"], "strip": strip, "port": port,
+        }
+    return strips, mapped
+
+
+def utc_now():
+    return datetime.now(timezone.utc)
+
+
+class Controller:
+    def __init__(self, config, state_path):
+        self.strips, self.lights = configured_lights(config)
+        self.schedule = Schedule(config)
+        self.state_path = state_path
+        self.overrides = json.loads(state_path.read_text()) if state_path.exists() else {}
+        self.lock = asyncio.Lock()
+
+    def save(self, state):
+        temporary = self.state_path.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps(state))
+        temporary.replace(self.state_path)
+        self.overrides = state
+
+    def night_state(self, night):
+        if night and self.overrides.get("night") == night:
+            return self.overrides
+        return {"night": night, "rotation_enabled": self.overrides.get("rotation_enabled", False)}
+
+    def desired(self, night, state):
+        if not night:
+            return {}
+        if state.get("rotating"):
+            return {state["selected"]: True}
+        overrides = state.get("lights", {})
         return {
-            "night": bool(night), "timezone": self.schedule.zone.key, "next_event": event, "next_time": time, "error": self.error,
+            light_id: overrides.get(light_id, light["on_start"])
+            for light_id, light in self.lights.items()
+        }
+
+    def rotation_deadline(self, night, state):
+        if night and state.get("rotation_enabled") and self.lights:
+            return state.get("rotation_at") or (
+                datetime.fromisoformat(night).timestamp() + ROTATION_INTERVAL
+            )
+        return None
+
+    async def disconnect(self):
+        await asyncio.gather(*(strip.disconnect() for strip in self.strips.values()))
+
+    async def reconcile(self):
+        now = utc_now()
+        night, _, _ = self.schedule.current(now)
+        state = self.night_state(night)
+        deadline = self.rotation_deadline(night, state)
+        if deadline is not None and now.timestamp() >= deadline:
+            previous = state.get("selected")
+            choices = [light_id for light_id in self.lights if light_id != previous]
+            selected = random.choice(choices or list(self.lights))
+            state = {
+                "night": night, "rotation_enabled": True, "rotating": True,
+                "selected": selected, "rotation_at": now.timestamp() + ROTATION_INTERVAL,
+            }
+            self.save(state)
+
+        by_strip = {name: set() for name in self.strips}
+        for light_id, on in self.desired(night, state).items():
+            if on and light_id in self.lights:
+                light = self.lights[light_id]
+                by_strip[light["strip"]].add(light["port"])
+        # Turn off outlets on other strips before lighting a new rotation pick.
+        active = self.lights.get(state.get("selected"), {}) if state.get("rotating") else {}
+        active_strip = active.get("strip")
+        await asyncio.gather(*(
+            strip.reconcile(by_strip[name])
+            for name, strip in self.strips.items() if name != active_strip
+        ))
+        if active_strip:
+            await self.strips[active_strip].reconcile(by_strip[active_strip])
+
+    def status(self):
+        now = utc_now()
+        night, event, time = self.schedule.current(now)
+        state = self.night_state(night)
+        deadline = self.rotation_deadline(night, state)
+        selected = self.lights.get(state.get("selected"), {})
+        errors = {name: strip.error for name, strip in self.strips.items() if strip.error}
+        return {
+            "night": bool(night), "timezone": self.schedule.zone.key, "next_event": event,
+            "next_time": time, "error": " · ".join(f"{name}: {error}" for name, error in errors.items()),
+            "rotation": {
+                "enabled": state.get("rotation_enabled", False),
+                "next_at": deadline,
+                "server_now": now.timestamp(),
+                "manual": bool(state.get("lights")),
+                "active": selected.get("name") if state.get("rotating") else None,
+                "window": selected.get("window") if state.get("rotating") else None,
+            },
             "lights": [
-                {"port": port, **self.lights[port], "on": self.actual.get(port)}
-                for port in OUTLETS if port in self.lights
+                {**light, "on": self.strips[light["strip"]].actual.get(light["port"])}
+                for light in self.lights.values()
             ],
         }
 
     async def toggle(self, request):
-        port = request.match_info["port"]
-        if port not in self.lights:
-            raise web.HTTPNotFound(text="That outlet has no light mapped.")
-        if request.content_type != "application/json":
-            raise web.HTTPUnsupportedMediaType()
-        try:
-            body = await request.json()
-        except ValueError:
-            raise web.HTTPBadRequest(text="Expected a JSON object.")
-        if not isinstance(body, dict) or type(body.get("on")) is not bool:
-            raise web.HTTPBadRequest(text="Expected a boolean on field.")
+        light_id = request.match_info["port"]
+        light = self.lights.get(light_id)
+        if light is None:
+            raise web.HTTPNotFound(text="That light is not configured.")
+        on = await boolean_field(request, "on")
         async with self.lock:
-            night, _, _ = self.schedule.current(datetime.now(timezone.utc))
+            now = utc_now()
+            night, _, _ = self.schedule.current(now)
             if night is None:
                 raise web.HTTPConflict(text="Controls are available from sunset until sunrise.")
-            if self.error:
-                raise web.HTTPServiceUnavailable(text=self.error)
-            lights = dict(self.overrides.get("lights", {})) if self.overrides.get("night") == night else {}
-            lights[port] = body["on"]
-            overrides = {"night": night, "lights": lights}
-            temporary = self.state_path.with_suffix(".json.tmp")
-            temporary.write_text(json.dumps(overrides))
-            temporary.replace(self.state_path)
-            self.overrides = overrides
+            strip = self.strips[light["strip"]]
+            if strip.error:
+                raise web.HTTPServiceUnavailable(text=strip.error)
+            state = dict(self.night_state(night))
+            lights = self.desired(night, state) if state.get("rotating") else dict(state.get("lights", {}))
+            # Keep other outlets at their current settings when manual control starts.
+            if state.get("rotating"):
+                lights = {key: lights.get(key, False) for key in self.lights}
+            lights[light_id] = on
+            state.update(lights=lights, rotating=False, rotation_at=now.timestamp() + ROTATION_INTERVAL)
+            self.save(state)
             await self.reconcile()
-            if self.error:
-                return web.json_response(self.status(), status=202)
+            return web.json_response(self.status(), status=202 if strip.error else 200)
+
+    async def set_rotation(self, request):
+        enabled = await boolean_field(request, "enabled")
+        if enabled and not self.lights:
+            raise web.HTTPConflict(text="Configure at least one light to enable rotation.")
+        async with self.lock:
+            now = utc_now()
+            night, _, _ = self.schedule.current(now)
+            state = dict(self.night_state(night))
+            if enabled != state.get("rotation_enabled", False):
+                state.update(rotation_enabled=enabled, rotating=False)
+                state["rotation_at"] = now.timestamp() + ROTATION_INTERVAL if night and enabled else None
+                self.save(state)
+                await self.reconcile()
             return web.json_response(self.status())
 
     async def run(self):
         while True:
             async with self.lock:
-                await self.reconcile()
+                try:
+                    await self.reconcile()
+                except OSError:
+                    LOG.exception("Could not save rotation state")
             await asyncio.sleep(5)
+
+
+async def boolean_field(request, field):
+    if request.content_type != "application/json":
+        raise web.HTTPUnsupportedMediaType()
+    try:
+        body = await request.json()
+    except ValueError:
+        raise web.HTTPBadRequest(text="Expected a JSON object.")
+    if not isinstance(body, dict) or type(body.get(field)) is not bool:
+        raise web.HTTPBadRequest(text=f"Expected a boolean {field} field.")
+    return body[field]
 
 
 @web.middleware
@@ -202,6 +343,7 @@ def make_app(controller):
     app.router.add_get("/", index)
     app.router.add_get("/api/status", status)
     app.router.add_post("/api/lights/{port}", controller.toggle)
+    app.router.add_post("/api/rotation", controller.set_rotation)
     return app
 
 

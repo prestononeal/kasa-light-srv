@@ -14,6 +14,10 @@
   #schedule { color: #f6d592; }
   #message:empty { display: none; }
   #message { color: #ffcfbc; padding: .85rem 1rem; background: #3a2824; border-radius: .65rem; }
+  #rotation-panel { display: flex; flex-wrap: wrap; align-items: center; gap: .65rem 1.25rem; }
+  #rotation-panel label { display: flex; align-items: center; gap: .5rem; }
+  #rotation-panel input { width: 1.1rem; height: 1.1rem; accent-color: #f6d592; }
+  #rotation-status { margin: 0; font-variant-numeric: tabular-nums; }
   #outlets { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 15rem), 1fr)); gap: 1rem; margin-top: 2rem; }
   article { border: 1px solid #426354; border-radius: 1rem; padding: 1.15rem; background: #172b23; }
   article[data-on="true"] { border-color: #b49a5d; }
@@ -28,6 +32,10 @@
 <main>
   <h1>Christmas Lights</h1>
   <p id="schedule">Loading the light schedule…</p>
+  <div id="rotation-panel">
+    <label><input type="checkbox" id="rotation" disabled> Enable rotation</label>
+    <p id="rotation-status"></p>
+  </div>
   <p id="message" role="status"></p>
   <section id="outlets" aria-label="Light controls"></section>
 </main>
@@ -35,11 +43,36 @@
 const schedule = document.querySelector('#schedule');
 const message = document.querySelector('#message');
 const outlets = document.querySelector('#outlets');
+const rotation = document.querySelector('#rotation');
+const rotationStatus = document.querySelector('#rotation-status');
 const cards = new Map();
+let rotationInfo = null;
+let countdownEnds = null;
+let refreshId = 0;
 let pending = false;
 let commandError = '';
 
+function renderCountdown() {
+  if (!rotationInfo) return;
+  if (countdownEnds === null) {
+    rotationStatus.textContent = rotationInfo.enabled ? 'Enabled for tonight' : 'Off';
+    return;
+  }
+  const seconds = Math.max(0, Math.ceil((countdownEnds - performance.now()) / 1000));
+  const remaining = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
+  const active = [rotationInfo.active, rotationInfo.window].filter(Boolean).join(' · ');
+  const label = active ? `${active} · Next random light`
+    : rotationInfo.manual ? 'Manual control · Rotation resumes' : 'Sunset defaults · Rotation starts';
+  rotationStatus.textContent = `${label} in ${remaining}`;
+}
+
 function render(data) {
+  rotationInfo = data.rotation;
+  countdownEnds = rotationInfo.next_at === null ? null
+    : performance.now() + (rotationInfo.next_at - rotationInfo.server_now) * 1000;
+  rotation.checked = rotationInfo.enabled;
+  rotation.disabled = pending || (!data.lights.length && !rotationInfo.enabled);
+  renderCountdown();
   const next = data.next_time && new Intl.DateTimeFormat(undefined, {
     timeZone: data.timezone, weekday: 'short', hour: 'numeric', minute: '2-digit', timeZoneName: 'short'
   }).format(new Date(data.next_time));
@@ -47,51 +80,57 @@ function render(data) {
   schedule.textContent = next ? `${phase} · Next ${data.next_event} ${next}` : phase;
   message.textContent = commandError || data.error || '';
   for (const light of data.lights) {
-    if (!cards.has(light.port)) {
+    if (!cards.has(light.id)) {
       const card = document.createElement('article');
       const label = document.createElement('small');
       const name = document.createElement('h2');
       const startup = document.createElement('p');
       const button = document.createElement('button');
-      label.textContent = `Outlet ${light.port}`;
+      label.textContent = light.window || `Outlet ${light.port}`;
       name.textContent = light.name;
-      startup.textContent = light.on_start ? 'Turns on at sunset' : 'Manual after sunset';
-      button.addEventListener('click', () => toggle(light.port, card.dataset.on !== 'true'));
+      startup.textContent = light.on_start ? 'Turns on at sunset' : 'Off at sunset';
+      button.addEventListener('click', () => update(
+        `/api/lights/${encodeURIComponent(light.id)}`, {on: card.dataset.on !== 'true'}
+      ));
       card.append(label, name, startup, button);
       outlets.append(card);
-      cards.set(light.port, {card, button});
+      cards.set(light.id, {card, button});
     }
-    const {card, button} = cards.get(light.port);
+    const {card, button} = cards.get(light.id);
     card.dataset.on = light.on;
     button.textContent = light.on === null ? 'Unavailable' : light.on ? 'On' : 'Off';
     button.setAttribute('aria-pressed', String(light.on === true));
-    button.setAttribute('aria-label', `${light.name} power`);
-    button.disabled = pending || !data.night || Boolean(data.error);
+    button.setAttribute('aria-label', [light.name, light.window, 'power'].filter(Boolean).join(' '));
+    button.disabled = pending || !data.night || light.on === null;
   }
 }
 
 async function refresh() {
   if (pending) return;
+  const id = ++refreshId;
   try {
     const response = await fetch('/api/status', {cache: 'no-store'});
     if (!response.ok) throw new Error('Dashboard unavailable.');
     const data = await response.json();
-    if (!pending) render(data);
+    if (!pending && id === refreshId) render(data);
   } catch {
-    if (pending) return;
+    if (pending || id !== refreshId) return;
+    rotation.disabled = true;
     message.textContent = 'Dashboard unavailable. Reconnecting…';
     for (const {button} of cards.values()) button.disabled = true;
   }
 }
 
-async function toggle(port, on) {
+async function update(url, body) {
   if (pending) return;
   pending = true;
+  refreshId++;
+  rotation.disabled = true;
   commandError = '';
   for (const {button} of cards.values()) button.disabled = true;
   try {
-    const response = await fetch(`/api/lights/${port}`, {
-      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({on})
+    const response = await fetch(url, {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)
     });
     if (!response.ok) throw new Error(await response.text());
   } catch (error) {
@@ -102,8 +141,10 @@ async function toggle(port, on) {
   }
 }
 
+rotation.addEventListener('change', () => update('/api/rotation', {enabled: rotation.checked}));
 refresh();
 setInterval(refresh, 3000);
+setInterval(renderCountdown, 250);
 </script>
 </body>
 </html>
