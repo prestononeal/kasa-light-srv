@@ -76,7 +76,7 @@ function render(data) {
   const next = data.next_time && new Intl.DateTimeFormat(undefined, {
     timeZone: data.timezone, weekday: 'short', hour: 'numeric', minute: '2-digit', timeZoneName: 'short'
   }).format(new Date(data.next_time));
-  const phase = data.night ? 'Night controls are open' : 'Daytime · lights off';
+  const phase = data.night ? 'Night schedule' : 'Daytime · manual lights turn off after 5 minutes';
   schedule.textContent = next ? `${phase} · Next ${data.next_event} ${next}` : phase;
   message.textContent = commandError || data.error || '';
   for (const light of data.lights) {
@@ -101,7 +101,7 @@ function render(data) {
     button.textContent = light.on === null ? 'Unavailable' : light.on ? 'On' : 'Off';
     button.setAttribute('aria-pressed', String(light.on === true));
     button.setAttribute('aria-label', [light.name, light.window, 'power'].filter(Boolean).join(' '));
-    button.disabled = pending || !data.night || light.on === null;
+    button.disabled = pending || light.on === null;
   }
 }
 

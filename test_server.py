@@ -124,12 +124,49 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
                         await controller.reconcile()
                     self.assertFalse(any(outlet.is_on for outlet in strip.children))
                     response = await client.post("/api/lights/2", json={"on": True})
-                    self.assertEqual(response.status, 409)
+                    self.assertEqual(response.status, 200)
+                    self.assertTrue(strip.children[1].is_on)
 
                     current.return_value = ("next night", "sunrise", None)
                     async with controller.lock:
                         await controller.reconcile()
                     self.assertEqual([outlet.is_on for outlet in strip.children], [True] + [False] * 5)
+
+    async def test_daytime_manual_lights_expire_independently(self):
+        noon = datetime(2026, 11, 26, 18, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "state.json"
+            controller = Controller(CONFIG, path)
+            strip = Strip()
+            controller.strips["main"].device = strip
+            with patch("server.utc_now", return_value=noon) as clock:
+                async with TestClient(TestServer(make_app(controller))) as client:
+                    response = await client.post("/api/lights/1", json={"on": True})
+                    self.assertEqual(response.status, 200)
+                    status = await response.json()
+                    self.assertFalse(status["night"])
+                    self.assertTrue(status["lights"][0]["on"])
+                    self.assertIsNone(status["rotation"]["next_at"])
+
+                    clock.return_value = noon + timedelta(minutes=1)
+                    response = await client.post("/api/lights/2", json={"on": True})
+                    self.assertEqual(response.status, 200)
+
+                    restarted = Controller(CONFIG, path)
+                    restarted.strips["main"].device = strip
+                    clock.return_value = noon + timedelta(seconds=299)
+                    await restarted.reconcile()
+                    self.assertEqual([outlet.is_on for outlet in strip.children[:2]], [True, True])
+
+                    clock.return_value = noon + timedelta(minutes=5)
+                    async with controller.lock:
+                        await controller.reconcile()
+                    self.assertEqual([outlet.is_on for outlet in strip.children[:2]], [False, True])
+
+                    response = await client.post("/api/lights/2", json={"on": False})
+                    self.assertEqual(response.status, 200)
+                    self.assertFalse(strip.children[1].is_on)
+                    self.assertNotIn("2", json.loads(path.read_text())["daytime_until"])
 
     async def test_random_rotation_across_strips_and_manual_countdown(self):
         config = {

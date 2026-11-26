@@ -19,6 +19,7 @@ from kasa import AuthenticationError, Discover
 from kasa.iot import IotPlug, IotStrip
 
 ROTATION_INTERVAL = 300
+DAYTIME_ON_SECONDS = 300
 OUTLETS = tuple(str(port) for port in range(1, 7))
 LOG = logging.getLogger(__name__)
 
@@ -167,6 +168,8 @@ async def discover_aliases(strips):
             strip.error = "Kasa discovery failed. Retrying automatically."
         return
 
+    authentication_failures = set()
+
     async def identify(host, device):
         try:
             if not device.model.startswith("HS300"):
@@ -174,6 +177,10 @@ async def discover_aliases(strips):
             device = devices[host] = strip_device(device)
             await device.update(update_children=False)
             return device.alias
+        except AuthenticationError:
+            authentication_failures.add(host)
+            LOG.warning("Could not authenticate to the HS300 at %s to read its Kasa alias", host)
+            return None
         except Exception as exc:
             LOG.debug("Could not identify a discovered Kasa device: %s", exc)
             return None
@@ -192,6 +199,8 @@ async def discover_aliases(strips):
                 retained.add(hosts[0])
             elif hosts:
                 strip.error = f'More than one HS300 is named "{alias}". Give each strip a unique Kasa name.'
+            elif authentication_failures:
+                strip.error = "An HS300 answered discovery, but authentication failed before its alias could be read."
             else:
                 strip.error = f'Could not find an HS300 named "{alias}". Check its Kasa name and credentials.'
     finally:
@@ -255,15 +264,26 @@ class Controller:
         temporary.replace(self.state_path)
         self.overrides = state
 
-    def night_state(self, night):
+    def schedule_state(self, night, now):
         rotation_enabled = self.overrides.get("rotation_enabled", True)
+        if night is None:
+            daytime_until = self.overrides.get("daytime_until", {})
+            timestamp = now.timestamp()
+            return {
+                "night": None,
+                "rotation_enabled": rotation_enabled,
+                "daytime_until": {
+                    light_id: deadline for light_id, deadline in daytime_until.items()
+                    if deadline > timestamp
+                },
+            }
         if night and self.overrides.get("night") == night:
             return {**self.overrides, "rotation_enabled": rotation_enabled}
         return {"night": night, "rotation_enabled": rotation_enabled}
 
     def desired(self, night, state):
         if not night:
-            return {}
+            return dict.fromkeys(state["daytime_until"], True)
         if state.get("rotating"):
             return {state["selected"]: True}
         overrides = state.get("lights", {})
@@ -289,7 +309,7 @@ class Controller:
         if phase != self.last_phase:
             LOG.info("Lighting schedule entered %s", phase)
             self.last_phase = phase
-        state = self.night_state(night)
+        state = self.schedule_state(night, now)
         deadline = self.rotation_deadline(night, state)
         if deadline is not None and now.timestamp() >= deadline:
             previous = state.get("selected")
@@ -337,7 +357,7 @@ class Controller:
     def status(self):
         now = utc_now()
         night, event, time = self.schedule.current(now)
-        state = self.night_state(night)
+        state = self.schedule_state(night, now)
         deadline = self.rotation_deadline(night, state)
         selected = self.lights.get(state.get("selected"), {})
         errors = {name: strip.error for name, strip in self.strips.items() if strip.error}
@@ -367,18 +387,24 @@ class Controller:
         async with self.lock:
             now = utc_now()
             night, _, _ = self.schedule.current(now)
-            if night is None:
-                raise web.HTTPConflict(text="Controls are available from sunset until sunrise.")
             strip = self.strips[light["strip"]]
             if strip.error:
                 raise web.HTTPServiceUnavailable(text=strip.error)
-            state = dict(self.night_state(night))
-            lights = self.desired(night, state) if state.get("rotating") else dict(state.get("lights", {}))
-            # Keep other outlets at their current settings when manual control starts.
-            if state.get("rotating"):
-                lights = {key: lights.get(key, False) for key in self.lights}
-            lights[light_id] = on
-            state.update(lights=lights, rotating=False, rotation_at=now.timestamp() + ROTATION_INTERVAL)
+            state = self.schedule_state(night, now)
+            if night is None:
+                daytime_until = state["daytime_until"]
+                if on:
+                    daytime_until[light_id] = now.timestamp() + DAYTIME_ON_SECONDS
+                else:
+                    daytime_until.pop(light_id, None)
+            else:
+                lights = dict(state.get("lights", {}))
+                # Keep other outlets at their current settings when manual control starts.
+                if state.get("rotating"):
+                    desired = self.desired(night, state)
+                    lights = {key: desired.get(key, False) for key in self.lights}
+                lights[light_id] = on
+                state.update(lights=lights, rotating=False, rotation_at=now.timestamp() + ROTATION_INTERVAL)
             self.save(state)
             LOG.info("Manual request for %r (%s, outlet %s): %s", light["name"], light["strip"],
                      light["port"], "on" if on else "off")
@@ -392,7 +418,7 @@ class Controller:
         async with self.lock:
             now = utc_now()
             night, _, _ = self.schedule.current(now)
-            state = dict(self.night_state(night))
+            state = self.schedule_state(night, now)
             if enabled != state["rotation_enabled"]:
                 state.update(rotation_enabled=enabled, rotating=False)
                 state["rotation_at"] = now.timestamp() + ROTATION_INTERVAL if night and enabled else None

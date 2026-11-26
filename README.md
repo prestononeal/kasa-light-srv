@@ -49,9 +49,9 @@ Run `./start.sh --watch` from the repository directory. The server restarts when
 
 ## Schedule
 
-At sunset, outlets with `on_start: true` turn on. All others start off. Until sunrise, dashboard users can switch each mapped outlet independently. At sunrise, the server turns all six outlets off and disables manual controls. The server calculates solar times locally and checks the strip roughly every five seconds. It reconciles any changes made directly on the strip or in the Kasa app.
+At sunset, outlets with `on_start: true` turn on. All others start off. Dashboard users can switch each mapped outlet independently at any time. At sunrise, the server turns all six outlets off. Turning a light on during the day starts a five-minute timer for that light. You can turn it off sooner, and the night schedule takes over at sunset. The server calculates solar times locally and checks the strip roughly every five seconds. It reconciles any changes made directly on the strip or in the Kasa app.
 
-The server saves dashboard overrides next to the config in a local `*.overrides.json` file. They survive a restart during the same night and expire at sunrise. If the strip drops off Wi-Fi, the server applies the current schedule when it reconnects. Keep the host awake and the server running for transitions to happen on time.
+The server saves dashboard overrides next to the config in a local `*.overrides.json` file. Nighttime overrides survive a restart during the same night and expire at sunrise. Daytime overrides also survive a restart until their timers expire or the night schedule begins. If the strip drops off Wi-Fi, the server applies the current schedule when it reconnects. Keep the host awake and the server running for transitions to happen on time.
 
 ## Window decorations and multiple strips
 
@@ -84,4 +84,4 @@ Use letters, numbers, hyphens, or underscores for each light ID. Keep that ID wh
 
 Rotation is on by default and picks one random decoration across all strips every five minutes. Use **Enable rotation** on the dashboard to change the shared setting. Your choice survives a restart. The first pick is due five minutes after sunset, or five minutes after enabling rotation during the night. Each pick turns off the other outlets and avoids repeating the previous pick when at least two decorations are configured.
 
-Each manual switch change resets the shared five-minute countdown. When it expires, rotation picks a decoration and replaces the manual settings. Turning rotation off returns to the sunset defaults if a random pick was active, or keeps any current manual settings. Rotation stops at sunrise and the enabled setting carries forward to the next night. The dashboard shows the current phase and time remaining.
+Each nighttime manual switch change resets the shared five-minute countdown. When it expires, rotation picks a decoration and replaces the manual settings. Turning rotation off returns to the sunset defaults if a random pick was active, or keeps any current manual settings. Rotation stops at sunrise and the enabled setting carries forward to the next night. The dashboard shows the current phase and time remaining.
