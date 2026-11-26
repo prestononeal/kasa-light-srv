@@ -58,8 +58,8 @@ The example single-strip config still works. To map decorations across strips, r
 ```json
 {
   "strips": {
-    "front": "192.0.2.11",
-    "upstairs": "192.0.2.12"
+    "front": {"alias": "Front Windows"},
+    "upstairs": {"alias": "Upstairs Windows"}
   },
   "lights": {
     "peppermints": {
@@ -73,6 +73,8 @@ The example single-strip config still works. To map decorations across strips, r
   }
 }
 ```
+
+Copy each strip's exact friendly name from the Kasa app into `alias`. Give each HS300 a unique name. The server discovers alias-based strips on the local network at startup and looks them up again after a disconnect, so their IP addresses can change. You can mix aliases with IP strings, such as `"upstairs": "192.0.2.12"`. Restart the server after editing the config.
 
 Use letters, numbers, hyphens, or underscores for each light ID. Keep that ID when moving a decoration to a different outlet. Each strip and outlet pair can be assigned to one light. The optional window label appears on the dashboard. The server keeps unused outlets on every configured strip off.
 

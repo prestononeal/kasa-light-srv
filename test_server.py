@@ -36,14 +36,19 @@ class Outlet:
 class Strip:
     model = "HS300"
 
-    def __init__(self):
+    def __init__(self, host="127.0.0.1", alias=None):
+        self.host = host
+        self.alias = alias
         self.children = [Outlet(True) for _ in range(6)]
+        self.offline = False
+        self.closed = False
 
     async def update(self, *, update_children):
-        pass
+        if self.offline:
+            raise OSError("Strip went offline")
 
     async def disconnect(self):
-        pass
+        self.closed = True
 
 
 class ServerTests(unittest.IsolatedAsyncioTestCase):
@@ -114,7 +119,7 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "state.json"
             controller = Controller(config, path)
-            front, upstairs = Strip(), Strip()
+            front, upstairs = Strip(), Strip("127.0.0.2")
             controller.strips["front"].device = front
             controller.strips["upstairs"].device = upstairs
             with (
@@ -198,6 +203,62 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
                         controller.status()["rotation"]["next_at"],
                         clock.return_value.timestamp() + 300,
                     )
+
+
+    async def test_two_aliases_share_discovery_and_reconnect_at_new_ip(self):
+        config = {
+            **CONFIG,
+            "strips": {"front": {"alias": "Front Windows"}, "upstairs": {"alias": "Upstairs"}},
+            "lights": {
+                "peppermints": {"name": "Peppermints", "strip": "front", "port": 1, "on_start": True},
+                "star": {"name": "Star", "strip": "upstairs", "port": 1, "on_start": False},
+            },
+        }
+        dusk = datetime(2026, 11, 26, 0, 0, tzinfo=timezone.utc)
+        front = Strip("127.0.0.1", "Front Windows")
+        upstairs = Strip("127.0.0.2", "Upstairs")
+        unrelated = Strip("127.0.0.3", "Other")
+        moved = Strip("127.0.0.4", "Upstairs")
+        duplicate = Strip("127.0.0.5", "Upstairs")
+
+        with tempfile.TemporaryDirectory() as directory:
+            controller = Controller(config, Path(directory) / "state.json")
+            with (
+                patch.object(controller.schedule, "current", return_value=(dusk.isoformat(), "sunrise", None)),
+                patch("server.utc_now", return_value=dusk),
+                patch("server.Discover.discover", return_value={
+                    strip.host: strip for strip in (front, upstairs, unrelated)
+                }) as discover,
+            ):
+                await controller.reconcile()
+                discover.assert_awaited_once()
+                self.assertTrue(unrelated.closed)
+                self.assertTrue(front.children[0].is_on)
+                self.assertFalse(upstairs.children[0].is_on)
+
+                async with TestClient(TestServer(make_app(controller))) as client:
+                    response = await client.post("/api/lights/star", json={"on": True})
+                    self.assertEqual(response.status, 200)
+                    self.assertTrue(upstairs.children[0].is_on)
+                    self.assertTrue(front.children[0].is_on)
+                    discover.assert_awaited_once()
+
+                    async with controller.lock:
+                        upstairs.offline = True
+                        await controller.reconcile()
+                        self.assertTrue(upstairs.closed)
+                        discover.return_value = {strip.host: strip for strip in (moved, duplicate)}
+                        await controller.reconcile()
+                        self.assertIn("More than one HS300", controller.status()["error"])
+                        self.assertTrue(moved.closed)
+                        self.assertTrue(duplicate.closed)
+
+                        discover.return_value = {moved.host: moved}
+                        await controller.reconcile()
+                        self.assertEqual(controller.status()["error"], "")
+                        self.assertIs(controller.strips["upstairs"].device, moved)
+                        self.assertTrue(moved.children[0].is_on)
+                        self.assertFalse(moved.children[1].is_on)
 
 
 if __name__ == "__main__":

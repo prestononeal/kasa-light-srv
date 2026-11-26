@@ -57,11 +57,39 @@ class Schedule:
         )
 
 
+def discovery_options():
+    return {
+        "timeout": 3,
+        "discovery_timeout": 3,
+        "username": os.environ.get("KASA_USERNAME"),
+        "password": os.environ.get("KASA_PASSWORD"),
+    }
+
+
+async def close_device(device):
+    try:
+        await device.disconnect()
+    except Exception as exc:
+        LOG.debug("Error closing device connection: %s", exc)
+
+
+def strip_device(device):
+    # KLAP discovery can identify an HS300 as a plain plug.
+    if isinstance(device, IotPlug) and device.model.startswith("HS300"):
+        return IotStrip(device.host, protocol=device.protocol)
+    return device
+
+
 class PowerStrip:
-    def __init__(self, host):
-        if not isinstance(host, str) or not host.strip() or host == "192.0.2.10":
-            raise ValueError("Set each HS300's IP address")
-        self.host = host
+    def __init__(self, address):
+        self.host = address if isinstance(address, str) else None
+        self.alias = address.get("alias") if isinstance(address, dict) else None
+        if isinstance(address, str):
+            if not self.host.strip() or self.host == "192.0.2.10":
+                raise ValueError("Set each HS300's address")
+        elif not (isinstance(address, dict) and address.keys() == {"alias"}
+                  and isinstance(self.alias, str) and self.alias.strip()):
+            raise ValueError('Use a host address or {"alias": "Kasa strip name"} for each strip')
         self.device = None
         self.actual = {}
         self.error = "Connecting to the HS300…"
@@ -69,27 +97,36 @@ class PowerStrip:
     async def disconnect(self):
         device, self.device = self.device, None
         if device is not None:
-            try:
-                await device.disconnect()
-            except Exception as exc:
-                LOG.debug("Error closing the HS300 connection: %s", exc)
+            await close_device(device)
 
-    async def reconcile(self, on_ports):
+    async def connection_failed(self, exc):
+        LOG.warning("HS300 %s update failed: %s", self.alias or self.host, exc)
+        if isinstance(exc, AuthenticationError):
+            self.error = "HS300 authentication failed. Check KASA_USERNAME and KASA_PASSWORD."
+        else:
+            self.error = "HS300 unavailable. Retrying automatically."
+        self.actual = {}
+        await self.disconnect()
+
+    async def prepare(self):
+        if self.alias is not None and self.device is None:
+            return
         try:
             if self.device is None:
-                self.device = await Discover.discover_single(
-                    self.host, timeout=3, discovery_timeout=3,
-                    username=os.environ.get("KASA_USERNAME"),
-                    password=os.environ.get("KASA_PASSWORD"),
-                )
+                self.device = await Discover.discover_single(self.host, **discovery_options())
             if self.device is None:
                 raise RuntimeError("No device answered discovery")
-            # KLAP discovery can identify this strip as a plain IOT plug.
-            if isinstance(self.device, IotPlug) and self.device.model.startswith("HS300"):
-                self.device = IotStrip(self.host, protocol=self.device.protocol)
+            self.device = strip_device(self.device)
             await self.device.update(update_children=False)
             if not self.device.model.startswith("HS300") or len(self.device.children) != 6:
                 raise RuntimeError("Expected an HS300 with six individually controllable outlets")
+            if self.alias is not None and self.device.alias != self.alias:
+                raise RuntimeError("The device no longer has the configured Kasa alias")
+        except Exception as exc:
+            await self.connection_failed(exc)
+
+    async def apply(self, on_ports):
+        try:
             outlets = dict(zip(OUTLETS, self.device.children))
             changed = False
             for desired in (False, True):
@@ -102,13 +139,51 @@ class PowerStrip:
             self.actual = {port: outlet.is_on for port, outlet in outlets.items()}
             self.error = None
         except Exception as exc:
-            LOG.warning("HS300 at %s update failed: %s", self.host, exc)
-            if isinstance(exc, AuthenticationError):
-                self.error = "HS300 authentication failed. Check KASA_USERNAME and KASA_PASSWORD."
+            await self.connection_failed(exc)
+
+
+async def discover_aliases(strips):
+    pending = {strip.alias: strip for strip in strips if strip.alias is not None and strip.device is None}
+    if not pending:
+        return
+
+    try:
+        devices = await Discover.discover(**discovery_options())
+    except Exception:
+        LOG.exception("Kasa alias discovery failed")
+        for strip in pending.values():
+            strip.error = "Kasa discovery failed. Retrying automatically."
+        return
+
+    async def identify(host, device):
+        try:
+            if not device.model.startswith("HS300"):
+                return None
+            device = devices[host] = strip_device(device)
+            await device.update(update_children=False)
+            return device.alias
+        except Exception as exc:
+            LOG.debug("Could not identify a discovered Kasa device: %s", exc)
+            return None
+
+    retained = set()
+    try:
+        aliases = await asyncio.gather(*(identify(host, device) for host, device in devices.items()))
+        matches = {alias: [] for alias in pending}
+        for host, alias in zip(devices, aliases):
+            if alias in matches:
+                matches[alias].append(host)
+        for alias, strip in pending.items():
+            hosts = matches[alias]
+            if len(hosts) == 1:
+                strip.device = devices[hosts[0]]
+                retained.add(hosts[0])
+            elif hosts:
+                strip.error = f'More than one HS300 is named "{alias}". Give each strip a unique Kasa name.'
             else:
-                self.error = "HS300 unavailable. Retrying automatically."
-            self.actual = {}
-            await self.disconnect()
+                strip.error = f'Could not find an HS300 named "{alias}". Check its Kasa name and credentials.'
+    finally:
+        await asyncio.gather(*(close_device(device) for host, device in devices.items() if host not in retained))
 
 
 def configured_lights(config):
@@ -118,12 +193,12 @@ def configured_lights(config):
 
     # Legacy single-strip configs use outlet numbers as their light IDs.
     legacy = "strips" not in config
-    hosts = {"main": config["strip_host"]} if legacy else config["strips"]
-    if not isinstance(hosts, dict) or not hosts:
-        raise ValueError("strips must map strip names to HS300 IP addresses")
-    strips = {name: PowerStrip(host) for name, host in hosts.items()}
-    if len({strip.host for strip in strips.values()}) != len(strips):
-        raise ValueError("Each strip needs a unique address")
+    addresses = {"main": config["strip_host"]} if legacy else config["strips"]
+    if not isinstance(addresses, dict) or not addresses:
+        raise ValueError("strips must map strip IDs to HS300 addresses or aliases")
+    strips = {name: PowerStrip(address) for name, address in addresses.items()}
+    if len({(strip.host, strip.alias) for strip in strips.values()}) != len(strips):
+        raise ValueError("Each strip needs a unique address or Kasa alias")
 
     mapped = {}
     used_ports = set()
@@ -214,15 +289,31 @@ class Controller:
             if on and light_id in self.lights:
                 light = self.lights[light_id]
                 by_strip[light["strip"]].add(light["port"])
+        await discover_aliases(self.strips.values())
+        await asyncio.gather(*(strip.prepare() for strip in self.strips.values()))
+        connected = {}
+        for name, strip in self.strips.items():
+            if strip.device is not None:
+                connected.setdefault(strip.device.host, []).append(name)
+        ready = set()
+        for names in connected.values():
+            if len(names) == 1:
+                ready.add(names[0])
+            else:
+                for name in names:
+                    strip = self.strips[name]
+                    strip.actual = {}
+                    strip.error = "Multiple config entries refer to this HS300."
+
         # Turn off outlets on other strips before lighting a new rotation pick.
         active = self.lights.get(state.get("selected"), {}) if state.get("rotating") else {}
         active_strip = active.get("strip")
         await asyncio.gather(*(
-            strip.reconcile(by_strip[name])
-            for name, strip in self.strips.items() if name != active_strip
+            self.strips[name].apply(by_strip[name])
+            for name in ready if name != active_strip
         ))
-        if active_strip:
-            await self.strips[active_strip].reconcile(by_strip[active_strip])
+        if active_strip in ready:
+            await self.strips[active_strip].apply(by_strip[active_strip])
 
     def status(self):
         now = utc_now()
