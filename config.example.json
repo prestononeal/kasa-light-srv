@@ -1,0 +1,14 @@
+{
+  "strip_host": "192.0.2.10",
+  "latitude": 41.8781,
+  "longitude": -87.6298,
+  "timezone": "America/Chicago",
+  "lights": {
+    "1": {"name": "Roofline", "on_start": true},
+    "2": {"name": "Porch", "on_start": true},
+    "3": {"name": "Tree", "on_start": false},
+    "4": {"name": "Walkway", "on_start": false},
+    "5": {"name": "Wreath", "on_start": false},
+    "6": {"name": "Yard", "on_start": false}
+  }
+}

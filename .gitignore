@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+config.json
+*.overrides.json
+*.overrides.json.tmp
+.python/
