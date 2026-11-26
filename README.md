@@ -13,10 +13,14 @@ cp -n config.example.json config.json
 ```
 
 1. Connect the HS300 to your Wi-Fi with the Kasa app. Run `.venv/bin/kasa discover` or check your router's device list to find its IP address. A DHCP reservation keeps the address stable.
-2. Edit `config.json` with the strip's IP, your latitude and longitude, and your IANA time zone, such as `America/Chicago`. The example coordinates are for Chicago.
+2. Edit `config.json` with the strip's IP and the location where it runs. Replace `null` in `latitude` and `longitude` with decimal numbers, without quotes, and set `timezone` to your IANA time zone. For example, Chicago uses `"latitude": 41.8781`, `"longitude": -87.6298`, and `"timezone": "America/Chicago"`. The server needs these settings to calculate sunrise and sunset.
 3. Set each outlet's light name and `on_start` setting. Outlet numbers run from 1 through 6 in the same order as the strip reports them. Verify the mapping against your strip with a single light when setting up. Omit unused outlets from `lights`. The server keeps those outlets off.
 
 ## Start the server on macOS
+
+Save your TP-Link credentials in one password item named `kasa-light-srv` in the login Keychain. Set the item's account name to your TP-Link email. From the repository directory, run `./start.sh`. The launcher reads the email and password from that item. If macOS asks whether `security` can access the item, choose **Allow** for this launch.
+
+### Start without Keychain
 
 Open Terminal and change to the repository directory. For a checkout at `~/git/kasa-light-srv`, run the following in the default macOS shell (zsh).
 

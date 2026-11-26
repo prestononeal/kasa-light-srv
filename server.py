@@ -20,8 +20,13 @@ LOG = logging.getLogger(__name__)
 
 class Schedule:
     def __init__(self, config):
-        latitude = float(config["latitude"])
-        longitude = float(config["longitude"])
+        try:
+            latitude = float(config.get("latitude"))
+            longitude = float(config.get("longitude"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "Set latitude and longitude to numeric coordinates for the strip's location"
+            ) from exc
         if not (-90 <= latitude <= 90 and -180 <= longitude <= 180):
             raise ValueError("Set valid latitude and longitude in config.json")
         self.observer = Observer(latitude, longitude)
