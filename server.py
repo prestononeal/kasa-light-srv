@@ -4,6 +4,7 @@ import ipaddress
 import json
 import logging
 import os
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -208,7 +209,17 @@ def main():
     parser = argparse.ArgumentParser(description="Serve the HS300 Christmas lights dashboard")
     parser.add_argument("--config", type=Path, default=Path("config.json"))
     parser.add_argument("--port", type=int, default=8080)
+    parser.add_argument("--watch", action="store_true", help="Restart on development file changes")
     args = parser.parse_args()
+    if args.watch:
+        from dev_watch import run
+
+        source = Path(__file__).resolve()
+        run(
+            [sys.executable, "-u", str(source), "--config", str(args.config), "--port", str(args.port)],
+            [source, source.with_name("index.html"), args.config],
+        )
+        return
     logging.basicConfig(level=logging.INFO)
     try:
         config = json.loads(args.config.read_text())

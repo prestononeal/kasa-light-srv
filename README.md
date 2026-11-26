@@ -41,6 +41,10 @@ Open `http://localhost:8080` on the server. On other devices on the same Wi-Fi, 
 
 Use `--config /path/to/config.json` to select another config file or `--port 8081` to change the listening port. Restart the server after editing the config.
 
+## Watch mode for development
+
+Run `./start.sh --watch` from the repository directory. The server restarts when `server.py`, `index.html`, or the selected config file changes. The launcher reads Keychain once for the session. Press `Ctrl+C` to stop both the watcher and server.
+
 ## Schedule
 
 At sunset, outlets with `on_start: true` turn on. All others start off. Until sunrise, dashboard users can switch each mapped outlet independently. At sunrise, the server turns all six outlets off and disables manual controls. The server calculates solar times locally and checks the strip roughly every five seconds. It reconciles any changes made directly on the strip or in the Kasa app.
