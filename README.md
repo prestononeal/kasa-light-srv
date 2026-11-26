@@ -37,7 +37,7 @@ Enter the email and password for the TP-Link account linked to the strip. The pa
 
 Wait for `Running on http://0.0.0.0:8080` in Terminal. Leave that window open while the server runs. Press `Ctrl+C` to stop it.
 
-Open `http://localhost:8080` on the server. On other devices on the same Wi-Fi, open `http://<server-LAN-IP>:8080` using the server's IPv4 address, separate from the strip's address. On a Mac, look under System Settings → Wi-Fi → Details → TCP/IP. Allow incoming connections if the host firewall prompts. Anyone who can reach the dashboard can use it, so keep it on your trusted local network and leave router port forwarding disabled.
+Open `http://localhost:8080` on the server. On other devices on the same Wi-Fi, use the server’s Bonjour name on macOS (for example, `http://prestons-mac-mini.local:8080/`) or open `http://<server-LAN-IP>:8080` using the server's IPv4 address, separate from the strip's address. On a Mac, look under System Settings → Wi-Fi → Details → TCP/IP. Allow incoming connections if the host firewall prompts. Anyone who can reach the dashboard can use it, so keep it on your trusted local network and leave router port forwarding disabled.
 
 Use `--config /path/to/config.json` to select another config file or `--port 8081` to change the listening port. Restart the server after editing the config.
 

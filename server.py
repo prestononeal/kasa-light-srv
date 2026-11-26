@@ -6,6 +6,7 @@ import logging
 import os
 import random
 import re
+import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -422,19 +423,33 @@ async def boolean_field(request, field):
     return body[field]
 
 
-@web.middleware
-async def check_host(request, handler):
-    # LAN IPs and localhost work without accepting arbitrary DNS names.
-    host = request.host.rsplit(":", 1)[0] if ":" in request.host else request.host
-    if host != "localhost":
-        try:
-            ipaddress.IPv4Address(host)
-        except ValueError:
-            raise web.HTTPBadRequest(text="Open the dashboard using the server's IPv4 address.")
-    return await handler(request)
+def bonjour_hostname():
+    if sys.platform != "darwin":
+        return None
+    try:
+        name = subprocess.check_output(
+            ["/usr/sbin/scutil", "--get", "LocalHostName"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return f"{name.lower()}.local" if name else None
 
 
-def make_app(controller):
+def make_app(controller, bonjour_host=None):
+    @web.middleware
+    async def check_host(request, handler):
+        # Allow only the server's Bonjour name alongside localhost and IPv4.
+        host = request.host.rsplit(":", 1)[0].lower()
+        if host != "localhost" and host.removesuffix(".") != bonjour_host:
+            try:
+                ipaddress.IPv4Address(host)
+            except ValueError:
+                address = f"{bonjour_host} or the server's IPv4 address" if bonjour_host else "the server's IPv4 address"
+                raise web.HTTPBadRequest(text=f"Open the dashboard using {address}.")
+        return await handler(request)
+
     app = web.Application(middlewares=[check_host], client_max_size=4096)
 
     async def worker(_app):
@@ -482,7 +497,7 @@ def main():
         controller = Controller(config, args.config.with_suffix(".overrides.json"))
     except (OSError, KeyError, TypeError, ValueError) as exc:
         parser.error(f"Could not load {args.config}: {exc}")
-    web.run_app(make_app(controller), host="0.0.0.0", port=args.port, access_log=None)
+    web.run_app(make_app(controller, bonjour_hostname()), host="0.0.0.0", port=args.port, access_log=None)
 
 
 if __name__ == "__main__":

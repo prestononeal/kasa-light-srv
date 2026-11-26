@@ -52,6 +52,23 @@ class Strip:
 
 
 class ServerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_dashboard_hosts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            controller = Controller(CONFIG, Path(directory) / "state.json")
+            app = make_app(controller, "prestons-mac-mini.local")
+            async with TestClient(TestServer(app)) as client:
+                for host, expected in (
+                    ("prestons-mac-mini.local:8080", 200),
+                    ("Prestons-Mac-Mini.LOCAL.:8080", 200),
+                    ("localhost:8080", 200),
+                    ("192.168.1.10:8080", 200),
+                    ("other-device.local:8080", 400),
+                    ("example.com:8080", 400),
+                ):
+                    with self.subTest(host=host):
+                        async with client.get("/", headers={"Host": host}) as response:
+                            self.assertEqual(response.status, expected)
+
     def test_solar_boundaries_and_midnight(self):
         schedule = Schedule(CONFIG)
         date = datetime(2026, 11, 25).date()
