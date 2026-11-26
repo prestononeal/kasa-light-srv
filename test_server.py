@@ -62,6 +62,7 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
     async def test_manual_controls_restart_and_sunrise(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "state.json"
+            path.write_text(json.dumps({"rotation_enabled": False}))
             controller = Controller(CONFIG, path)
             strip = Strip()
             controller.strips["main"].device = strip
@@ -124,9 +125,15 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
                 await controller.reconcile()
                 self.assertTrue(front.children[0].is_on)
                 self.assertTrue(upstairs.children[0].is_on)
-                self.assertFalse(controller.status()["rotation"]["enabled"])
+                self.assertTrue(controller.status()["rotation"]["enabled"])
+                self.assertEqual(controller.status()["rotation"]["next_at"], sunset_at.timestamp() + 300)
 
                 async with TestClient(TestServer(make_app(controller))) as client:
+                    response = await client.post("/api/rotation", json={"enabled": False})
+                    self.assertEqual(response.status, 200)
+                    self.assertFalse((await response.json())["rotation"]["enabled"])
+                    self.assertFalse(Controller(config, path).status()["rotation"]["enabled"])
+
                     response = await client.post("/api/rotation", json={"enabled": True})
                     self.assertEqual(response.status, 200)
                     self.assertEqual(

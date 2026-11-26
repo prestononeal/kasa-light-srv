@@ -168,9 +168,10 @@ class Controller:
         self.overrides = state
 
     def night_state(self, night):
+        rotation_enabled = self.overrides.get("rotation_enabled", True)
         if night and self.overrides.get("night") == night:
-            return self.overrides
-        return {"night": night, "rotation_enabled": self.overrides.get("rotation_enabled", False)}
+            return {**self.overrides, "rotation_enabled": rotation_enabled}
+        return {"night": night, "rotation_enabled": rotation_enabled}
 
     def desired(self, night, state):
         if not night:
@@ -184,7 +185,7 @@ class Controller:
         }
 
     def rotation_deadline(self, night, state):
-        if night and state.get("rotation_enabled") and self.lights:
+        if night and state["rotation_enabled"] and self.lights:
             return state.get("rotation_at") or (
                 datetime.fromisoformat(night).timestamp() + ROTATION_INTERVAL
             )
@@ -234,7 +235,7 @@ class Controller:
             "night": bool(night), "timezone": self.schedule.zone.key, "next_event": event,
             "next_time": time, "error": " · ".join(f"{name}: {error}" for name, error in errors.items()),
             "rotation": {
-                "enabled": state.get("rotation_enabled", False),
+                "enabled": state["rotation_enabled"],
                 "next_at": deadline,
                 "server_now": now.timestamp(),
                 "manual": bool(state.get("lights")),
@@ -280,7 +281,7 @@ class Controller:
             now = utc_now()
             night, _, _ = self.schedule.current(now)
             state = dict(self.night_state(night))
-            if enabled != state.get("rotation_enabled", False):
+            if enabled != state["rotation_enabled"]:
                 state.update(rotation_enabled=enabled, rotating=False)
                 state["rotation_at"] = now.timestamp() + ROTATION_INTERVAL if night and enabled else None
                 self.save(state)

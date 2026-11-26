@@ -78,6 +78,6 @@ Use letters, numbers, hyphens, or underscores for each light ID. Keep that ID wh
 
 ## Random rotation
 
-**Enable rotation** on the dashboard to pick one random decoration across all strips every five minutes. The setting is off by default and is shared by everyone using the dashboard. The first pick is due five minutes after sunset, or five minutes after enabling rotation during the night. Each pick turns off the other outlets and avoids repeating the previous pick when at least two decorations are configured.
+Rotation is on by default and picks one random decoration across all strips every five minutes. Use **Enable rotation** on the dashboard to change the shared setting. Your choice survives a restart. The first pick is due five minutes after sunset, or five minutes after enabling rotation during the night. Each pick turns off the other outlets and avoids repeating the previous pick when at least two decorations are configured.
 
 Each manual switch change resets the shared five-minute countdown. When it expires, rotation picks a decoration and replaces the manual settings. Turning rotation off returns to the sunset defaults if a random pick was active, or keeps any current manual settings. Rotation stops at sunrise and the enabled setting carries forward to the next night. The dashboard shows the current phase and time remaining.
