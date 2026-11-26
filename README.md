@@ -41,6 +41,8 @@ Open `http://localhost:8080` on the server. On other devices on the same Wi-Fi, 
 
 Use `--config /path/to/config.json` to select another config file or `--port 8081` to change the listening port. Restart the server after editing the config.
 
+The server writes timestamped logs to Terminal. It logs schedule transitions, rotation picks and setting changes, manual requests, and confirmed outlet changes, including changes it detects from the Kasa app or the physical strip buttons.
+
 ## Watch mode for development
 
 Run `./start.sh --watch` from the repository directory. The server restarts when `server.py`, `index.html`, or the selected config file changes. The launcher reads Keychain once for the session. Press `Ctrl+C` to stop both the watcher and server.

@@ -77,12 +77,23 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
 
                 async with TestClient(TestServer(make_app(controller))) as client:
                     self.assertEqual((await client.get("/")).status, 200)
-                    response = await client.post("/api/lights/2", json={"on": True})
+                    with self.assertLogs("server", level="INFO") as logs:
+                        response = await client.post("/api/lights/2", json={"on": True})
                     self.assertEqual(response.status, 200)
+                    self.assertIn("Manual request for 'Porch' (main, outlet 2): on", "\n".join(logs.output))
+                    self.assertIn("Changed HS300 '127.0.0.1' outlet 2: on", "\n".join(logs.output))
                     self.assertTrue((await response.json())["lights"][1]["on"])
                     self.assertTrue(strip.children[0].is_on)
                     self.assertFalse(strip.children[2].is_on)
                     self.assertEqual(json.loads(path.read_text())["lights"], {"2": True})
+
+                    async with controller.lock:
+                        with self.assertNoLogs("server", level="INFO"):
+                            await controller.reconcile()
+                        await strip.children[1].turn_off()
+                        with self.assertLogs("server", level="INFO") as logs:
+                            await controller.reconcile()
+                    self.assertIn("Observed HS300 '127.0.0.1' outlet 2: off", "\n".join(logs.output))
 
                     restarted = Controller(CONFIG, path)
                     restarted.strips["main"].device = strip

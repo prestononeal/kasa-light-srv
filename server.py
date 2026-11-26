@@ -128,6 +128,10 @@ class PowerStrip:
     async def apply(self, on_ports):
         try:
             outlets = dict(zip(OUTLETS, self.device.children))
+            observed = {port: outlet.is_on for port, outlet in outlets.items()}
+            if self.error:
+                LOG.info("Connected to HS300 %r at %s", self.alias or self.host, self.device.host)
+            self.log_outlet_changes("Observed", self.actual, observed)
             changed = False
             for desired in (False, True):
                 for port, outlet in outlets.items():
@@ -137,9 +141,16 @@ class PowerStrip:
             if changed:
                 await self.device.update(update_children=False)
             self.actual = {port: outlet.is_on for port, outlet in outlets.items()}
+            self.log_outlet_changes("Changed", observed, self.actual)
             self.error = None
         except Exception as exc:
             await self.connection_failed(exc)
+
+    def log_outlet_changes(self, action, before, after):
+        for port, on in after.items():
+            if port in before and before[port] != on:
+                LOG.info("%s HS300 %r outlet %s: %s", action, self.alias or self.host, port,
+                         "on" if on else "off")
 
 
 async def discover_aliases(strips):
@@ -235,6 +246,7 @@ class Controller:
         self.state_path = state_path
         self.overrides = json.loads(state_path.read_text()) if state_path.exists() else {}
         self.lock = asyncio.Lock()
+        self.last_phase = None
 
     def save(self, state):
         temporary = self.state_path.with_suffix(".json.tmp")
@@ -272,6 +284,10 @@ class Controller:
     async def reconcile(self):
         now = utc_now()
         night, _, _ = self.schedule.current(now)
+        phase = "night" if night else "daytime"
+        if phase != self.last_phase:
+            LOG.info("Lighting schedule entered %s", phase)
+            self.last_phase = phase
         state = self.night_state(night)
         deadline = self.rotation_deadline(night, state)
         if deadline is not None and now.timestamp() >= deadline:
@@ -283,6 +299,8 @@ class Controller:
                 "selected": selected, "rotation_at": now.timestamp() + ROTATION_INTERVAL,
             }
             self.save(state)
+            light = self.lights[selected]
+            LOG.info("Rotation selected %r (%s, outlet %s)", light["name"], light["strip"], light["port"])
 
         by_strip = {name: set() for name in self.strips}
         for light_id, on in self.desired(night, state).items():
@@ -361,6 +379,8 @@ class Controller:
             lights[light_id] = on
             state.update(lights=lights, rotating=False, rotation_at=now.timestamp() + ROTATION_INTERVAL)
             self.save(state)
+            LOG.info("Manual request for %r (%s, outlet %s): %s", light["name"], light["strip"],
+                     light["port"], "on" if on else "off")
             await self.reconcile()
             return web.json_response(self.status(), status=202 if strip.error else 200)
 
@@ -376,6 +396,7 @@ class Controller:
                 state.update(rotation_enabled=enabled, rotating=False)
                 state["rotation_at"] = now.timestamp() + ROTATION_INTERVAL if night and enabled else None
                 self.save(state)
+                LOG.info("Rotation %s from dashboard", "enabled" if enabled else "disabled")
                 await self.reconcile()
             return web.json_response(self.status())
 
@@ -454,7 +475,8 @@ def main():
             [source, source.with_name("index.html"), args.config],
         )
         return
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s",
+                        datefmt="%Y-%m-%d %H:%M:%S %z")
     try:
         config = json.loads(args.config.read_text())
         controller = Controller(config, args.config.with_suffix(".overrides.json"))
