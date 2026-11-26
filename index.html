@@ -49,6 +49,7 @@ const cards = new Map();
 let rotationInfo = null;
 let countdownEnds = null;
 let refreshId = 0;
+let refreshing = false;
 let pending = false;
 let commandError = '';
 
@@ -106,10 +107,13 @@ function render(data) {
 }
 
 async function refresh() {
-  if (pending) return;
-  const id = ++refreshId;
+  if (pending || refreshing) return;
+  refreshing = true;
+  const id = refreshId;
   try {
-    const response = await fetch('/api/status', {cache: 'no-store'});
+    const response = await fetch('/api/status', {
+      cache: 'no-store', signal: AbortSignal.timeout(10000)
+    });
     if (!response.ok) throw new Error('Dashboard unavailable.');
     const data = await response.json();
     if (!pending && id === refreshId) render(data);
@@ -118,6 +122,8 @@ async function refresh() {
     rotation.disabled = true;
     message.textContent = 'Dashboard unavailable. Reconnecting…';
     for (const {button} of cards.values()) button.disabled = true;
+  } finally {
+    refreshing = false;
   }
 }
 
@@ -130,11 +136,13 @@ async function update(url, body) {
   for (const {button} of cards.values()) button.disabled = true;
   try {
     const response = await fetch(url, {
-      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body),
+      signal: AbortSignal.timeout(30000)
     });
     if (!response.ok) throw new Error(await response.text());
   } catch (error) {
-    commandError = error.message;
+    commandError = error.name === 'TimeoutError'
+      ? 'The command timed out. Checking the current light state…' : error.message;
   } finally {
     pending = false;
     await refresh();
