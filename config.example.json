@@ -9,6 +9,6 @@
     "3": {"name": "Tree", "on_start": false},
     "4": {"name": "Walkway", "on_start": false},
     "5": {"name": "Snowflakes", "on_start": true},
-    "6": {"name": "Yard", "on_start": false}
+    "6": {"name": "Star", "on_start": false}
   }
 }
