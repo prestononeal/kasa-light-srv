@@ -148,7 +148,7 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
                     self.assertTrue(status["lights"][0]["on"])
                     self.assertIsNone(status["rotation"]["next_at"])
 
-                    clock.return_value = noon + timedelta(minutes=1)
+                    clock.return_value = noon + timedelta(seconds=15)
                     response = await client.post("/api/lights/2", json={"on": True})
                     self.assertEqual(response.status, 200)
 
@@ -177,6 +177,8 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
                                 "strip": "front", "port": 1, "on_start": True},
                 "star": {"name": "Star", "window": "Landing",
                          "strip": "upstairs", "port": 1, "on_start": True},
+                "snowflakes": {"name": "Snowflakes", "strip": "upstairs", "port": 2,
+                               "on_start": False},
             },
         }
         sunset_at = datetime(2026, 11, 26, 0, 0, tzinfo=timezone.utc)
@@ -190,7 +192,7 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
             with (
                 patch.object(controller.schedule, "current", return_value=night) as phase,
                 patch("server.utc_now", return_value=sunset_at) as clock,
-                patch("server.random.choice", side_effect=lambda choices: choices[0]) as pick,
+                patch("server.random.sample", side_effect=lambda choices, count: choices[:count]) as pick,
             ):
                 await controller.reconcile()
                 self.assertTrue(front.children[0].is_on)
@@ -203,6 +205,8 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(response.status, 200)
                     self.assertFalse((await response.json())["rotation"]["enabled"])
                     self.assertFalse(Controller(config, path).status()["rotation"]["enabled"])
+                    response = await client.post("/api/rotation/pick")
+                    self.assertEqual(response.status, 409)
 
                     response = await client.post("/api/rotation", json={"enabled": True})
                     self.assertEqual(response.status, 200)
@@ -216,10 +220,14 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
                     clock.return_value = sunset_at + timedelta(minutes=5)
                     await controller.reconcile()
                     self.assertTrue(front.children[0].is_on)
-                    self.assertFalse(upstairs.children[0].is_on)
-                    self.assertEqual(controller.status()["rotation"]["active"], "Peppermints")
+                    self.assertTrue(upstairs.children[0].is_on)
+                    self.assertFalse(upstairs.children[1].is_on)
+                    self.assertEqual(controller.status()["rotation"]["active_lights"], [
+                        {"name": "Peppermints", "window": "Front bay"},
+                        {"name": "Star", "window": "Landing"},
+                    ])
 
-                    clock.return_value = sunset_at + timedelta(minutes=6)
+                    clock.return_value = sunset_at + timedelta(seconds=310)
                     response = await client.post("/api/lights/star", json={"on": True})
                     self.assertEqual(response.status, 200)
                     self.assertTrue(front.children[0].is_on)
@@ -228,7 +236,7 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
                     self.assertTrue(state["manual"])
                     self.assertEqual(state["next_at"], clock.return_value.timestamp() + 300)
 
-                    clock.return_value = sunset_at + timedelta(minutes=8)
+                    clock.return_value = sunset_at + timedelta(seconds=330)
                     response = await client.post("/api/lights/star", json={"on": False})
                     self.assertEqual(response.status, 200)
                     self.assertFalse(upstairs.children[0].is_on)
@@ -241,19 +249,31 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
                     restarted.strips["front"].device = front
                     restarted.strips["upstairs"].device = upstairs
                     with patch.object(restarted.schedule, "current", return_value=night):
-                        clock.return_value = sunset_at + timedelta(minutes=12)
+                        clock.return_value = sunset_at + timedelta(seconds=629)
                         await restarted.reconcile()
                         self.assertTrue(front.children[0].is_on)
                         self.assertFalse(upstairs.children[0].is_on)
 
-                        clock.return_value = sunset_at + timedelta(minutes=13)
+                        clock.return_value = sunset_at + timedelta(seconds=630)
                         await restarted.reconcile()
-                        pick.assert_called_with(["star"])
-                        self.assertFalse(front.children[0].is_on)
-                        self.assertTrue(upstairs.children[0].is_on)
-                        self.assertEqual(restarted.status()["rotation"]["active"], "Star")
+                        pick.assert_called_with(["peppermints", "star"], 1)
+                        self.assertTrue(front.children[0].is_on)
+                        self.assertFalse(upstairs.children[0].is_on)
+                        self.assertTrue(upstairs.children[1].is_on)
+                        self.assertEqual(restarted.status()["rotation"]["active"], "Snowflakes, Peppermints")
+
+                    clock.return_value = sunset_at + timedelta(seconds=631)
+                    response = await client.post("/api/rotation/pick")
+                    self.assertEqual(response.status, 200)
+                    rotation = (await response.json())["rotation"]
+                    self.assertEqual(rotation["active"], "Snowflakes, Peppermints")
+                    self.assertEqual(rotation["next_at"], clock.return_value.timestamp() + 300)
+                    self.assertFalse(upstairs.children[0].is_on)
+                    self.assertTrue(upstairs.children[1].is_on)
 
                     phase.return_value = (None, "sunset", None)
+                    response = await client.post("/api/rotation/pick")
+                    self.assertEqual(response.status, 409)
                     await controller.reconcile()
                     self.assertFalse(any(outlet.is_on for outlet in front.children + upstairs.children))
                     self.assertIsNone(controller.status()["rotation"]["next_at"])
