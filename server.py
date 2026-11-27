@@ -18,8 +18,7 @@ from astral.sun import sunrise, sunset
 from kasa import AuthenticationError, Discover
 from kasa.iot import IotPlug, IotStrip
 
-ROTATION_INTERVAL = 300
-DAYTIME_ON_SECONDS = 300
+LIGHT_TIMER_SECONDS = 300
 OUTLETS = tuple(str(port) for port in range(1, 7))
 LOG = logging.getLogger(__name__)
 
@@ -278,14 +277,17 @@ class Controller:
                 },
             }
         if night and self.overrides.get("night") == night:
-            return {**self.overrides, "rotation_enabled": rotation_enabled}
+            state = {**self.overrides, "rotation_enabled": rotation_enabled}
+            if isinstance(state.get("selected"), str):
+                state["selected"] = [state["selected"]]
+            return state
         return {"night": night, "rotation_enabled": rotation_enabled}
 
     def desired(self, night, state):
         if not night:
             return dict.fromkeys(state["daytime_until"], True)
         if state.get("rotating"):
-            return {state["selected"]: True}
+            return dict.fromkeys(state["selected"], True)
         overrides = state.get("lights", {})
         return {
             light_id: overrides.get(light_id, light["on_start"])
@@ -295,14 +297,14 @@ class Controller:
     def rotation_deadline(self, night, state):
         if night and state["rotation_enabled"] and self.lights:
             return state.get("rotation_at") or (
-                datetime.fromisoformat(night).timestamp() + ROTATION_INTERVAL
+                datetime.fromisoformat(night).timestamp() + LIGHT_TIMER_SECONDS
             )
         return None
 
     async def disconnect(self):
         await asyncio.gather(*(strip.disconnect() for strip in self.strips.values()))
 
-    async def reconcile(self):
+    async def reconcile(self, *, rotate_now=False):
         now = utc_now()
         night, _, _ = self.schedule.current(now)
         phase = "night" if night else "daytime"
@@ -311,17 +313,24 @@ class Controller:
             self.last_phase = phase
         state = self.schedule_state(night, now)
         deadline = self.rotation_deadline(night, state)
-        if deadline is not None and now.timestamp() >= deadline:
-            previous = state.get("selected")
-            choices = [light_id for light_id in self.lights if light_id != previous]
-            selected = random.choice(choices or list(self.lights))
+        if rotate_now and deadline is None:
+            raise web.HTTPConflict(text="Enable rotation at night to pick lights now.")
+        if deadline is not None and (rotate_now or now.timestamp() >= deadline):
+            previous = state.get("selected", [])
+            choices = [light_id for light_id in self.lights if light_id not in previous]
+            count = min(2, len(self.lights))
+            selected = random.sample(choices, min(count, len(choices)))
+            if len(selected) < count:
+                remaining = [light_id for light_id in self.lights if light_id in previous]
+                selected.extend(random.sample(remaining, count - len(selected)))
             state = {
                 "night": night, "rotation_enabled": True, "rotating": True,
-                "selected": selected, "rotation_at": now.timestamp() + ROTATION_INTERVAL,
+                "selected": selected, "rotation_at": now.timestamp() + LIGHT_TIMER_SECONDS,
             }
             self.save(state)
-            light = self.lights[selected]
-            LOG.info("Rotation selected %r (%s, outlet %s)", light["name"], light["strip"], light["port"])
+            for light_id in selected:
+                light = self.lights[light_id]
+                LOG.info("Rotation selected %r (%s, outlet %s)", light["name"], light["strip"], light["port"])
 
         by_strip = {name: set() for name in self.strips}
         for light_id, on in self.desired(night, state).items():
@@ -344,22 +353,23 @@ class Controller:
                     strip.actual = {}
                     strip.error = "Multiple config entries refer to this HS300."
 
-        # Turn off outlets on other strips before lighting a new rotation pick.
-        active = self.lights.get(state.get("selected"), {}) if state.get("rotating") else {}
-        active_strip = active.get("strip")
+        # Turn off strips without any selected lights before applying the new picks.
+        active_strips = {name for name in ready if state.get("rotating") and by_strip[name]}
         await asyncio.gather(*(
             self.strips[name].apply(by_strip[name])
-            for name in ready if name != active_strip
+            for name in ready - active_strips
         ))
-        if active_strip in ready:
-            await self.strips[active_strip].apply(by_strip[active_strip])
+        await asyncio.gather(*(self.strips[name].apply(by_strip[name]) for name in active_strips))
 
     def status(self):
         now = utc_now()
         night, event, time = self.schedule.current(now)
         state = self.schedule_state(night, now)
         deadline = self.rotation_deadline(night, state)
-        selected = self.lights.get(state.get("selected"), {})
+        selected = [
+            self.lights[light_id] for light_id in state.get("selected", [])
+            if state.get("rotating") and light_id in self.lights
+        ]
         errors = {name: strip.error for name, strip in self.strips.items() if strip.error}
         return {
             "night": bool(night), "timezone": self.schedule.zone.key, "next_event": event,
@@ -369,8 +379,11 @@ class Controller:
                 "next_at": deadline,
                 "server_now": now.timestamp(),
                 "manual": bool(state.get("lights")),
-                "active": selected.get("name") if state.get("rotating") else None,
-                "window": selected.get("window") if state.get("rotating") else None,
+                "active": ", ".join(light["name"] for light in selected) or None,
+                "window": selected[0]["window"] if len(selected) == 1 else None,
+                "active_lights": [
+                    {"name": light["name"], "window": light["window"]} for light in selected
+                ],
             },
             "lights": [
                 {**light, "on": self.strips[light["strip"]].actual.get(light["port"])}
@@ -394,7 +407,7 @@ class Controller:
             if night is None:
                 daytime_until = state["daytime_until"]
                 if on:
-                    daytime_until[light_id] = now.timestamp() + DAYTIME_ON_SECONDS
+                    daytime_until[light_id] = now.timestamp() + LIGHT_TIMER_SECONDS
                 else:
                     daytime_until.pop(light_id, None)
             else:
@@ -404,7 +417,7 @@ class Controller:
                     desired = self.desired(night, state)
                     lights = {key: desired.get(key, False) for key in self.lights}
                 lights[light_id] = on
-                state.update(lights=lights, rotating=False, rotation_at=now.timestamp() + ROTATION_INTERVAL)
+                state.update(lights=lights, rotating=False, rotation_at=now.timestamp() + LIGHT_TIMER_SECONDS)
             self.save(state)
             LOG.info("Manual request for %r (%s, outlet %s): %s", light["name"], light["strip"],
                      light["port"], "on" if on else "off")
@@ -421,10 +434,15 @@ class Controller:
             state = self.schedule_state(night, now)
             if enabled != state["rotation_enabled"]:
                 state.update(rotation_enabled=enabled, rotating=False)
-                state["rotation_at"] = now.timestamp() + ROTATION_INTERVAL if night and enabled else None
+                state["rotation_at"] = now.timestamp() + LIGHT_TIMER_SECONDS if night and enabled else None
                 self.save(state)
                 LOG.info("Rotation %s from dashboard", "enabled" if enabled else "disabled")
                 await self.reconcile()
+            return web.json_response(self.status())
+
+    async def pick_rotation(self, _request):
+        async with self.lock:
+            await self.reconcile(rotate_now=True)
             return web.json_response(self.status())
 
     async def run(self):
@@ -498,6 +516,7 @@ def make_app(controller, bonjour_host=None):
     app.router.add_get("/api/status", status)
     app.router.add_post("/api/lights/{port}", controller.toggle)
     app.router.add_post("/api/rotation", controller.set_rotation)
+    app.router.add_post("/api/rotation/pick", controller.pick_rotation)
     return app
 
 
